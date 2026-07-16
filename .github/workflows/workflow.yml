@@ -1,4 +1,4 @@
-name: Turnstile Solver
+name: run-solver
 
 on:
   workflow_dispatch:
@@ -11,15 +11,33 @@ on:
         description: "Cloudflare Turnstile sitekey"
         required: true
         default: "0x4AAAAAADnpjMgvQPlaYYog"
+  repository_dispatch:
+    types: [run-solver]
 
 jobs:
-  solve-turnstile:
+  run-solver:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Resolve inputs
+        id: cfg
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            TARGET_URL="${{ github.event.client_payload.target_url }}"
+            SITEKEY="${{ github.event.client_payload.sitekey }}"
+          else
+            TARGET_URL="${{ github.event.inputs.target_url }}"
+            SITEKEY="${{ github.event.inputs.sitekey }}"
+          fi
+          TARGET_URL="${TARGET_URL:-https://deltastudy.site/verify}"
+          SITEKEY="${SITEKEY:-0x4AAAAAADnpjMgvQPlaYYog}"
+          echo "target_url=$TARGET_URL" >> $GITHUB_OUTPUT
+          echo "sitekey=$SITEKEY" >> $GITHUB_OUTPUT
+          echo "Resolved target_url=$TARGET_URL sitekey=$SITEKEY (event: ${{ github.event_name }})"
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -52,7 +70,6 @@ jobs:
             echo "Retrying in 15s..."; sleep 15
           done
 
-      # api_solver.py is the real entrypoint (README: "Run the script ... python api_solver.py")
       - name: Start Turnstile Solver server
         working-directory: Turnstile-Solver-NEW
         run: |
@@ -86,12 +103,11 @@ jobs:
             print(f"{status}|{value}")
           PYEOF
 
-      # /turnstile?url=...&sitekey=... -> {"task_id": "..."}
       - name: Submit Turnstile task
         id: submit
         run: |
-          ENCODED_URL=$(echo "${{ github.event.inputs.target_url }}" | python3 parse_json.py encode)
-          SITEKEY="${{ github.event.inputs.sitekey }}"
+          ENCODED_URL=$(echo "${{ steps.cfg.outputs.target_url }}" | python3 parse_json.py encode)
+          SITEKEY="${{ steps.cfg.outputs.sitekey }}"
           TASK_ID=""
 
           for attempt in 1 2 3; do
@@ -113,7 +129,6 @@ jobs:
             echo "Attempt $attempt failed -- retrying in 5s..."; sleep 5
           done
 
-      # /result?id=... -> {"status":"processing"} | {"status":"ready","value":"<token>"} | {"status":"fail","value":"..."}
       - name: Poll for result token
         id: poll
         run: |
@@ -149,12 +164,130 @@ jobs:
             echo "Status: $STATUS -- waiting 10s before next poll..."; sleep 10
           done
 
+      - name: Verify token with deltastudy.site
+        id: verify
+        run: |
+          TOKEN="${{ steps.poll.outputs.token }}"
+          TARGET_URL="${{ steps.cfg.outputs.target_url }}"
+
+          for attempt in 1 2 3; do
+            echo ">>> verify attempt $attempt/3"
+            curl -sS -D headers.txt -o body.txt \
+              'https://deltastudy.site/api/turnstile/verify' \
+              -H 'accept: */*' \
+              -H 'accept-language: en-GB,en-US;q=0.9,en;q=0.8' \
+              -H 'content-type: application/json' \
+              -H 'origin: https://deltastudy.site' \
+              -H 'priority: u=1, i' \
+              -H "referer: ${TARGET_URL}" \
+              -H 'sec-ch-ua: "Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"' \
+              -H 'sec-ch-ua-mobile: ?0' \
+              -H 'sec-ch-ua-platform: "Windows"' \
+              -H 'sec-fetch-dest: empty' \
+              -H 'sec-fetch-mode: cors' \
+              -H 'sec-fetch-site: same-origin' \
+              -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36' \
+              --data-raw "{\"token\":\"${TOKEN}\"}" \
+              --max-time 30 && break
+
+            if [ $attempt -eq 3 ]; then echo "verify request failed after 3 attempts"; exit 1; fi
+            echo "Attempt $attempt failed -- retrying in 5s..."; sleep 5
+          done
+
+          echo "--- Response body ---"
+          cat body.txt
+          echo "--- Response headers ---"
+          cat headers.txt
+
+          COOKIES=$(grep -i '^set-cookie:' headers.txt | sed 's/^[Ss]et-[Cc]ookie: //' | tr -d '\r')
+          if [ -z "$COOKIES" ]; then
+            echo "No Set-Cookie header returned -- verify likely failed"
+            exit 1
+          fi
+
+          echo "Cookies received:"
+          echo "$COOKIES"
+
+          {
+            echo "cookies<<COOKIE_EOF"
+            echo "$COOKIES"
+            echo "COOKIE_EOF"
+          } >> $GITHUB_OUTPUT
+
+      # Store the session in Upstash Redis via its REST API (no TCP client needed)
+      - name: Save session cookie to Upstash Redis
+        env:
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          REDIS_KEY: ${{ secrets.REDIS_KEY }}
+          COOKIE_VALUE: ${{ steps.verify.outputs.cookies }}
+          TASK_ID: ${{ steps.submit.outputs.task_id }}
+          TOKEN_VALUE: ${{ steps.poll.outputs.token }}
+        run: |
+          cat > save_upstash.py << 'PYEOF'
+          import os
+          import sys
+          import json
+          import time
+          import urllib.request
+
+          rest_url = os.environ["UPSTASH_REDIS_REST_URL"].rstrip("/")
+          rest_token = os.environ["UPSTASH_REDIS_REST_TOKEN"]
+          key = os.environ.get("REDIS_KEY") or "deltastudy:session"
+
+          cookie_value = os.environ.get("COOKIE_VALUE", "")
+          if not cookie_value:
+              print("No cookie value to store -- aborting")
+              sys.exit(1)
+
+          payload = {
+              "cookies": cookie_value,
+              "task_id": os.environ.get("TASK_ID", ""),
+              "token": os.environ.get("TOKEN_VALUE", ""),
+              "updated_at": int(time.time()),
+          }
+
+          # Upstash REST "pipeline" endpoint: POST body is a JSON array
+          # representing the Redis command, e.g. ["SET", key, value].
+          # SET always overwrites any prior value under this key --
+          # there is only ever one record, never a growing list.
+          body = json.dumps(["SET", key, json.dumps(payload)]).encode()
+
+          req = urllib.request.Request(
+              f"{rest_url}/",
+              data=body,
+              method="POST",
+              headers={
+                  "Authorization": f"Bearer {rest_token}",
+                  "Content-Type": "application/json",
+              },
+          )
+
+          with urllib.request.urlopen(req, timeout=15) as resp:
+              result = json.loads(resp.read().decode())
+
+          if result.get("result") != "OK":
+              print(f"Unexpected Upstash response: {result}")
+              sys.exit(1)
+
+          print(f"Stored session under Upstash Redis key '{key}':")
+          print(json.dumps(payload, indent=2))
+          PYEOF
+
+          for attempt in 1 2 3; do
+            echo ">>> Upstash Redis write attempt $attempt/3"
+            python3 save_upstash.py && break
+            if [ $attempt -eq 3 ]; then echo "Failed to write to Upstash Redis after 3 attempts"; exit 1; fi
+            echo "Retrying in 5s..."; sleep 5
+          done
+
       - name: Action complete
         run: |
           echo "=========================================="
-          echo "  Turnstile solved successfully!"
+          echo "  Turnstile solved & verified successfully!"
           echo "  task_id : ${{ steps.submit.outputs.task_id }}"
           echo "  token   : ${{ steps.poll.outputs.token }}"
+          echo "  cookies : stored in Upstash Redis"
           echo "=========================================="
 
       - name: Print solver logs
