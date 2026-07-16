@@ -52,11 +52,12 @@ jobs:
             echo "Retrying in 15s..."; sleep 15
           done
 
+      # api_solver.py is the real entrypoint (README: "Run the script ... python api_solver.py")
       - name: Start Turnstile Solver server
         working-directory: Turnstile-Solver-NEW
         run: |
           source ../venv/bin/activate
-          nohup python main.py --headless > ../solver.log 2>&1 &
+          nohup python api_solver.py --browser_type chrome --port 5072 > ../solver.log 2>&1 &
           echo $! > ../solver.pid
           echo "Waiting for server on port 5072..."
           for i in $(seq 1 30); do
@@ -77,15 +78,15 @@ jobs:
             print(urllib.parse.quote(raw, safe=""))
           elif mode == "task_id":
             d = json.loads(raw)
-            err = d.get("errorId", 1)
-            tid = d.get("taskId", "")
-            print(f"{err}|{tid}")
-          elif mode == "token":
+            print(d.get("taskId", "") or d.get("task_id", ""))
+          elif mode == "result":
             d = json.loads(raw)
-            token = d.get("token") or (d.get("solution") or {}).get("token") or d.get("result") or ""
-            print(token)
+            status = d.get("status", "")
+            value = d.get("value", "")
+            print(f"{status}|{value}")
           PYEOF
 
+      # /turnstile?url=...&sitekey=... -> {"task_id": "..."}
       - name: Submit Turnstile task
         id: submit
         run: |
@@ -99,12 +100,10 @@ jobs:
             echo "Response: $RESPONSE"
 
             if [ -n "$RESPONSE" ]; then
-              PARSED=$(echo "$RESPONSE" | python3 parse_json.py task_id || true)
-              ERROR_ID=$(echo "$PARSED" | cut -d'|' -f1)
-              TASK_ID=$(echo "$PARSED" | cut -d'|' -f2)
+              TASK_ID=$(echo "$RESPONSE" | python3 parse_json.py task_id || true)
             fi
 
-            if [ "$ERROR_ID" = "0" ] && [ -n "$TASK_ID" ] && [ "$TASK_ID" != "null" ]; then
+            if [ -n "$TASK_ID" ] && [ "$TASK_ID" != "null" ]; then
               echo "Task submitted -- taskId: $TASK_ID"
               echo "task_id=$TASK_ID" >> $GITHUB_OUTPUT
               break
@@ -114,38 +113,48 @@ jobs:
             echo "Attempt $attempt failed -- retrying in 5s..."; sleep 5
           done
 
+      # /result?id=... -> {"status":"processing"} | {"status":"ready","value":"<token>"} | {"status":"fail","value":"..."}
       - name: Poll for result token
         id: poll
         run: |
           TASK_ID="${{ steps.submit.outputs.task_id }}"
-          echo "Polling /results?id=$TASK_ID every 10s up to 30s..."
+          echo "Polling /result?id=$TASK_ID every 10s up to 30s..."
           TOKEN=""
 
           for poll in 1 2 3; do
             echo "--- Poll $poll/3 ---"
-            RESPONSE=$(curl -sf "http://127.0.0.1:5072/results?id=${TASK_ID}" --max-time 15 || true)
+            RESPONSE=$(curl -sf "http://127.0.0.1:5072/result?id=${TASK_ID}" --max-time 15 || true)
             echo "Response: $RESPONSE"
 
+            STATUS=""
+            VALUE=""
             if [ -n "$RESPONSE" ]; then
-              TOKEN=$(echo "$RESPONSE" | python3 parse_json.py token || true)
+              PARSED=$(echo "$RESPONSE" | python3 parse_json.py result || true)
+              STATUS=$(echo "$PARSED" | cut -d'|' -f1)
+              VALUE=$(echo "$PARSED" | cut -d'|' -f2-)
             fi
 
-            if [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] && [ "$TOKEN" != "None" ]; then
+            if [ "$STATUS" = "ready" ]; then
+              TOKEN="$VALUE"
               echo "Token received: $TOKEN"
               echo "token=$TOKEN" >> $GITHUB_OUTPUT
               break
+            elif [ "$STATUS" = "fail" ]; then
+              echo "Solver reported failure: $VALUE"
+              cat solver.log
+              exit 1
             fi
 
-            if [ $poll -eq 3 ]; then echo "No token after 3 polls (30s)"; cat solver.log; exit 1; fi
-            echo "Not ready -- waiting 10s..."; sleep 10
+            if [ $poll -eq 3 ]; then echo "Still processing after 3 polls (30s) -- giving up"; cat solver.log; exit 1; fi
+            echo "Status: $STATUS -- waiting 10s before next poll..."; sleep 10
           done
 
       - name: Action complete
         run: |
           echo "=========================================="
           echo "  Turnstile solved successfully!"
-          echo "  taskId : ${{ steps.submit.outputs.task_id }}"
-          echo "  token  : ${{ steps.poll.outputs.token }}"
+          echo "  task_id : ${{ steps.submit.outputs.task_id }}"
+          echo "  token   : ${{ steps.poll.outputs.token }}"
           echo "=========================================="
 
       - name: Print solver logs
