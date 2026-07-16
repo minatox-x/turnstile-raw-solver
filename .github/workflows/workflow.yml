@@ -99,7 +99,8 @@ jobs:
           elif mode == "result":
             d = json.loads(raw)
             status = d.get("status", "")
-            value = d.get("value", "")
+            # Token may be top-level "value" OR nested under "solution"."token"
+            value = d.get("value") or (d.get("solution") or {}).get("token", "")
             print(f"{status}|{value}")
           PYEOF
 
