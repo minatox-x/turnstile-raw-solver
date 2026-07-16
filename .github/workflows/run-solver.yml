@@ -18,11 +18,13 @@ jobs:
   run-solver:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/turnstile-solver:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Resolve inputs
         id: cfg
         run: |
@@ -37,77 +39,25 @@ jobs:
           SITEKEY="${SITEKEY:-0x4AAAAAADnpjMgvQPlaYYog}"
           echo "target_url=$TARGET_URL" >> $GITHUB_OUTPUT
           echo "sitekey=$SITEKEY" >> $GITHUB_OUTPUT
-          echo "Resolved target_url=$TARGET_URL sitekey=$SITEKEY (event: ${{ github.event_name }})"
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Create virtual environment
-        run: python -m venv venv
-
-      - name: Clone Turnstile-Solver-NEW
-        run: git clone https://github.com/D3-vin/Turnstile-Solver-NEW
-
-      - name: Install Python dependencies
-        working-directory: Turnstile-Solver-NEW
-        run: |
-          for attempt in 1 2 3; do
-            echo ">>> pip install -- attempt $attempt/3"
-            source ../venv/bin/activate && pip install -r requirements.txt && break
-            if [ $attempt -eq 3 ]; then echo "pip install failed after 3 attempts"; exit 1; fi
-            echo "Retrying in 10s..."; sleep 10
-          done
-
-      - name: Install Chrome via patchright
-        working-directory: Turnstile-Solver-NEW
-        run: |
-          for attempt in 1 2 3; do
-            echo ">>> patchright install chrome -- attempt $attempt/3"
-            source ../venv/bin/activate && patchright install chrome && break
-            if [ $attempt -eq 3 ]; then echo "patchright install failed after 3 attempts"; exit 1; fi
-            echo "Retrying in 15s..."; sleep 15
-          done
 
       - name: Start Turnstile Solver server
-        working-directory: Turnstile-Solver-NEW
+        working-directory: /app/solver
         run: |
-          source ../venv/bin/activate
-          nohup python api_solver.py --browser_type chrome --port 5072 > ../solver.log 2>&1 &
-          echo $! > ../solver.pid
+          nohup python api_solver.py --browser_type chrome --port 5072 > /app/solver.log 2>&1 &
+          echo $! > /app/solver.pid
           echo "Waiting for server on port 5072..."
           for i in $(seq 1 30); do
             if curl -sf "http://127.0.0.1:5072/" > /dev/null 2>&1; then
               echo "Server ready after ${i}s"; break
             fi
-            if [ $i -eq 30 ]; then echo "Server failed to start"; cat ../solver.log; exit 1; fi
+            if [ $i -eq 30 ]; then echo "Server failed to start"; cat /app/solver.log; exit 1; fi
             sleep 1
           done
-
-      - name: Write JSON parse helper
-        run: |
-          cat > parse_json.py << 'PYEOF'
-          import sys, json, urllib.parse
-          mode = sys.argv[1]
-          raw = sys.stdin.read().strip()
-          if mode == "encode":
-            print(urllib.parse.quote(raw, safe=""))
-          elif mode == "task_id":
-            d = json.loads(raw)
-            print(d.get("taskId", "") or d.get("task_id", ""))
-          elif mode == "result":
-            d = json.loads(raw)
-            status = d.get("status", "")
-            # Token may be top-level "value" OR nested under "solution"."token"
-            value = d.get("value") or (d.get("solution") or {}).get("token", "")
-            print(f"{status}|{value}")
-          PYEOF
 
       - name: Submit Turnstile task
         id: submit
         run: |
-          ENCODED_URL=$(echo "${{ steps.cfg.outputs.target_url }}" | python3 parse_json.py encode)
+          ENCODED_URL=$(echo "${{ steps.cfg.outputs.target_url }}" | python3 /app/parse_json.py encode)
           SITEKEY="${{ steps.cfg.outputs.sitekey }}"
           TASK_ID=""
 
@@ -117,7 +67,7 @@ jobs:
             echo "Response: $RESPONSE"
 
             if [ -n "$RESPONSE" ]; then
-              TASK_ID=$(echo "$RESPONSE" | python3 parse_json.py task_id || true)
+              TASK_ID=$(echo "$RESPONSE" | python3 /app/parse_json.py task_id || true)
             fi
 
             if [ -n "$TASK_ID" ] && [ "$TASK_ID" != "null" ]; then
@@ -126,7 +76,7 @@ jobs:
               break
             fi
 
-            if [ $attempt -eq 3 ]; then echo "Failed to submit after 3 attempts"; cat solver.log; exit 1; fi
+            if [ $attempt -eq 3 ]; then echo "Failed to submit after 3 attempts"; cat /app/solver.log; exit 1; fi
             echo "Attempt $attempt failed -- retrying in 5s..."; sleep 5
           done
 
@@ -135,7 +85,6 @@ jobs:
         run: |
           TASK_ID="${{ steps.submit.outputs.task_id }}"
           echo "Polling /result?id=$TASK_ID every 10s up to 30s..."
-          TOKEN=""
 
           for poll in 1 2 3; do
             echo "--- Poll $poll/3 ---"
@@ -145,24 +94,23 @@ jobs:
             STATUS=""
             VALUE=""
             if [ -n "$RESPONSE" ]; then
-              PARSED=$(echo "$RESPONSE" | python3 parse_json.py result || true)
+              PARSED=$(echo "$RESPONSE" | python3 /app/parse_json.py result || true)
               STATUS=$(echo "$PARSED" | cut -d'|' -f1)
               VALUE=$(echo "$PARSED" | cut -d'|' -f2-)
             fi
 
             if [ "$STATUS" = "ready" ]; then
-              TOKEN="$VALUE"
-              echo "Token received: $TOKEN"
-              echo "token=$TOKEN" >> $GITHUB_OUTPUT
+              echo "Token received: $VALUE"
+              echo "token=$VALUE" >> $GITHUB_OUTPUT
               break
             elif [ "$STATUS" = "fail" ]; then
               echo "Solver reported failure: $VALUE"
-              cat solver.log
+              cat /app/solver.log
               exit 1
             fi
 
-            if [ $poll -eq 3 ]; then echo "Still processing after 3 polls (30s) -- giving up"; cat solver.log; exit 1; fi
-            echo "Status: $STATUS -- waiting 10s before next poll..."; sleep 10
+            if [ $poll -eq 3 ]; then echo "Still processing after 3 polls -- giving up"; cat /app/solver.log; exit 1; fi
+            echo "Status: $STATUS -- waiting 10s..."; sleep 10
           done
 
       - name: Verify token with deltastudy.site
@@ -173,20 +121,12 @@ jobs:
 
           for attempt in 1 2 3; do
             echo ">>> verify attempt $attempt/3"
-            curl -sS -D headers.txt -o body.txt \
+            curl -sS -D /tmp/headers.txt -o /tmp/body.txt \
               'https://deltastudy.site/api/turnstile/verify' \
               -H 'accept: */*' \
-              -H 'accept-language: en-GB,en-US;q=0.9,en;q=0.8' \
               -H 'content-type: application/json' \
               -H 'origin: https://deltastudy.site' \
-              -H 'priority: u=1, i' \
               -H "referer: ${TARGET_URL}" \
-              -H 'sec-ch-ua: "Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"' \
-              -H 'sec-ch-ua-mobile: ?0' \
-              -H 'sec-ch-ua-platform: "Windows"' \
-              -H 'sec-fetch-dest: empty' \
-              -H 'sec-fetch-mode: cors' \
-              -H 'sec-fetch-site: same-origin' \
               -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36' \
               --data-raw "{\"token\":\"${TOKEN}\"}" \
               --max-time 30 && break
@@ -196,26 +136,23 @@ jobs:
           done
 
           echo "--- Response body ---"
-          cat body.txt
+          cat /tmp/body.txt
           echo "--- Response headers ---"
-          cat headers.txt
+          cat /tmp/headers.txt
 
-          COOKIES=$(grep -i '^set-cookie:' headers.txt | sed 's/^[Ss]et-[Cc]ookie: //' | tr -d '\r')
+          COOKIES=$(grep -i '^set-cookie:' /tmp/headers.txt | sed 's/^[Ss]et-[Cc]ookie: //' | tr -d '\r')
           if [ -z "$COOKIES" ]; then
             echo "No Set-Cookie header returned -- verify likely failed"
             exit 1
           fi
 
-          echo "Cookies received:"
-          echo "$COOKIES"
-
+          echo "Cookies received: $COOKIES"
           {
             echo "cookies<<COOKIE_EOF"
             echo "$COOKIES"
             echo "COOKIE_EOF"
           } >> $GITHUB_OUTPUT
 
-      # Store the session in Upstash Redis via its REST API (no TCP client needed)
       - name: Save session cookie to Upstash Redis
         env:
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
@@ -225,18 +162,20 @@ jobs:
           TASK_ID: ${{ steps.submit.outputs.task_id }}
           TOKEN_VALUE: ${{ steps.poll.outputs.token }}
         run: |
-          cat > save_upstash.py << 'PYEOF'
-          import os
-          import sys
-          import json
-          import time
-          import urllib.request
+          for attempt in 1 2 3; do
+            echo ">>> Upstash Redis write attempt $attempt/3"
+            python3 /app/parse_json.py && break  # just a smoke-test that python works
+            # actual save script below
+          done
+
+          python3 - << 'PYEOF'
+          import os, sys, json, time, urllib.request
 
           rest_url = os.environ["UPSTASH_REDIS_REST_URL"].rstrip("/")
           rest_token = os.environ["UPSTASH_REDIS_REST_TOKEN"]
           key = os.environ.get("REDIS_KEY") or "deltastudy:session"
-
           cookie_value = os.environ.get("COOKIE_VALUE", "")
+
           if not cookie_value:
               print("No cookie value to store -- aborting")
               sys.exit(1)
@@ -248,12 +187,7 @@ jobs:
               "updated_at": int(time.time()),
           }
 
-          # Upstash REST "pipeline" endpoint: POST body is a JSON array
-          # representing the Redis command, e.g. ["SET", key, value].
-          # SET always overwrites any prior value under this key --
-          # there is only ever one record, never a growing list.
           body = json.dumps(["SET", key, json.dumps(payload)]).encode()
-
           req = urllib.request.Request(
               f"{rest_url}/",
               data=body,
@@ -271,16 +205,9 @@ jobs:
               print(f"Unexpected Upstash response: {result}")
               sys.exit(1)
 
-          print(f"Stored session under Upstash Redis key '{key}':")
+          print(f"Stored session under key '{key}':")
           print(json.dumps(payload, indent=2))
           PYEOF
-
-          for attempt in 1 2 3; do
-            echo ">>> Upstash Redis write attempt $attempt/3"
-            python3 save_upstash.py && break
-            if [ $attempt -eq 3 ]; then echo "Failed to write to Upstash Redis after 3 attempts"; exit 1; fi
-            echo "Retrying in 5s..."; sleep 5
-          done
 
       - name: Action complete
         run: |
@@ -293,9 +220,9 @@ jobs:
 
       - name: Print solver logs
         if: always()
-        run: cat solver.log || true
+        run: cat /app/solver.log || true
 
       - name: Stop solver server
         if: always()
         run: |
-          if [ -f solver.pid ]; then kill "$(cat solver.pid)" 2>/dev/null || true; fi
+          if [ -f /app/solver.pid ]; then kill "$(cat /app/solver.pid)" 2>/dev/null || true; fi
