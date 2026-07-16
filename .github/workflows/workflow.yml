@@ -1,0 +1,220 @@
+name: Turnstile Solver
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "Target URL to solve Turnstile for"
+        required: true
+        default: "https://deltastudy.site/verify"
+      sitekey:
+        description: "Cloudflare Turnstile sitekey"
+        required: true
+        default: "0x4AAAAAADnpjMgvQPlaYYog"
+
+jobs:
+  solve-turnstile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python 3.12 ─────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ── 3. python -m venv venv ────────────────────────────────────────────
+      - name: Create virtual environment
+        run: python -m venv venv
+
+      # ── 4. git clone Turnstile-Solver-NEW ─────────────────────────────────
+      - name: Clone Turnstile-Solver-NEW
+        run: git clone https://github.com/D3-vin/Turnstile-Solver-NEW
+
+      # ── 5. pip install -r requirements.txt  (3 retries) ───────────────────
+      - name: Install Python dependencies
+        working-directory: Turnstile-Solver-NEW
+        run: |
+          for attempt in 1 2 3; do
+            echo ">>> pip install — attempt $attempt/3"
+            source ../venv/bin/activate && pip install -r requirements.txt && break
+            if [ $attempt -eq 3 ]; then
+              echo "pip install failed after 3 attempts"
+              exit 1
+            fi
+            echo "Attempt $attempt failed — retrying in 10s..."
+            sleep 10
+          done
+
+      # ── 6. patchright install chrome  (3 retries) ─────────────────────────
+      - name: Install Chrome via patchright
+        working-directory: Turnstile-Solver-NEW
+        run: |
+          for attempt in 1 2 3; do
+            echo ">>> patchright install chrome — attempt $attempt/3"
+            source ../venv/bin/activate && patchright install chrome && break
+            if [ $attempt -eq 3 ]; then
+              echo "patchright install chrome failed after 3 attempts"
+              exit 1
+            fi
+            echo "Attempt $attempt failed — retrying in 15s..."
+            sleep 15
+          done
+
+      # ── 7. Start solver server on port 5072 ───────────────────────────────
+      - name: Start Turnstile Solver server
+        working-directory: Turnstile-Solver-NEW
+        run: |
+          source ../venv/bin/activate
+          nohup python main.py --headless > ../solver.log 2>&1 &
+          echo $! > ../solver.pid
+          echo "Solver PID: $(cat ../solver.pid)"
+
+          echo "Waiting for solver to be ready on port 5072..."
+          for i in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:5072/" > /dev/null 2>&1; then
+              echo "Server is up after ${i}s"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "Server did not start in 30s — logs:"
+              cat ../solver.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+      # ── 8. POST /turnstile?url=...&sitekey=...  (3 retries) ───────────────
+      #        Returns: {"errorId":0,"taskId":"<uuid>"}
+      - name: Submit Turnstile task
+        id: submit
+        run: |
+          ENCODED_URL=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" \
+            "${{ github.event.inputs.target_url }}")
+          SITEKEY="${{ github.event.inputs.sitekey }}"
+          TASK_ID=""
+
+          for attempt in 1 2 3; do
+            echo ">>> /turnstile attempt $attempt/3"
+            echo "    URL:     ${{ github.event.inputs.target_url }}"
+            echo "    Sitekey: $SITEKEY"
+
+            RESPONSE=$(curl -sf \
+              "http://127.0.0.1:5072/turnstile?url=${ENCODED_URL}&sitekey=${SITEKEY}" \
+              --max-time 30 || true)
+
+            echo "Response: $RESPONSE"
+
+            if [ -n "$RESPONSE" ]; then
+              ERROR_ID=$(echo "$RESPONSE" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('errorId', 1))
+except:
+    print(1)
+")
+              TASK_ID=$(echo "$RESPONSE" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('taskId', ''))
+except:
+    print('')
+")
+            fi
+
+            if [ "$ERROR_ID" = "0" ] && [ -n "$TASK_ID" ] && [ "$TASK_ID" != "null" ]; then
+              echo "Task submitted — taskId: $TASK_ID"
+              echo "task_id=$TASK_ID" >> $GITHUB_OUTPUT
+              break
+            fi
+
+            if [ $attempt -eq 3 ]; then
+              echo "Failed to submit task after 3 attempts."
+              cat solver.log
+              exit 1
+            fi
+
+            echo "Attempt $attempt failed (errorId=$ERROR_ID, taskId=$TASK_ID) — retrying in 5s..."
+            sleep 5
+          done
+
+      # ── 9. Poll /results?id=<taskId> every 10s up to 30s ─────────────────
+      #        Polls 3 times (at 0s, 10s, 20s) then fails if no token
+      - name: Poll for result token
+        id: poll
+        run: |
+          TASK_ID="${{ steps.submit.outputs.task_id }}"
+          echo "Polling /results?id=$TASK_ID (every 10s, up to 30s)..."
+          TOKEN=""
+
+          for poll in 1 2 3; do
+            echo "--- Poll $poll/3 ($(( (poll - 1) * 10 ))s elapsed) ---"
+
+            RESPONSE=$(curl -sf \
+              "http://127.0.0.1:5072/results?id=${TASK_ID}" \
+              --max-time 15 || true)
+
+            echo "Response: $RESPONSE"
+
+            if [ -n "$RESPONSE" ]; then
+              TOKEN=$(echo "$RESPONSE" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    # token may be nested under 'solution' or top-level
+    token = d.get('token') \
+         or (d.get('solution') or {}).get('token') \
+         or d.get('result') \
+         or ''
+    print(token)
+except:
+    print('')
+")
+            fi
+
+            if [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] && [ "$TOKEN" != "None" ]; then
+              echo "Token received on poll $poll: $TOKEN"
+              echo "token=$TOKEN" >> $GITHUB_OUTPUT
+              break
+            fi
+
+            if [ $poll -eq 3 ]; then
+              echo "No token received after 3 polls (30s). Task may still be pending."
+              cat solver.log
+              exit 1
+            fi
+
+            echo "Not ready yet — waiting 10s before next poll..."
+            sleep 10
+          done
+
+      # ── 10. Done — print final token ──────────────────────────────────────
+      - name: Action complete
+        run: |
+          echo "============================================"
+          echo "  Turnstile token obtained successfully!"
+          echo "  taskId : ${{ steps.submit.outputs.task_id }}"
+          echo "  token  : ${{ steps.poll.outputs.token }}"
+          echo "============================================"
+
+      # ── 11. Logs & cleanup (always runs) ──────────────────────────────────
+      - name: Print solver logs
+        if: always()
+        run: |
+          echo "=== Solver Logs ==="
+          cat solver.log || true
+
+      - name: Stop solver server
+        if: always()
+        run: |
+          if [ -f solver.pid ]; then
+            kill "$(cat solver.pid)" 2>/dev/null || true
+            echo "Solver stopped."
+          fi
