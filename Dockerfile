@@ -30,6 +30,6 @@ WORKDIR /app
 RUN git clone https://github.com/minatox-x/Turnstile-Solver-NEW solver
 RUN pip install --no-cache-dir -r solver/requirements.txt
 RUN pip install camoufox[geoip]
-RUN python -m camoufox fetch
-
+ENV XDG_CACHE_HOME=/opt/camoufox-cache
+RUN python3 -m camoufox fetch
 COPY parse_json.py /app/parse_json.py
