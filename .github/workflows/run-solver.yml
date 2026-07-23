@@ -23,6 +23,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
+      options: --sysctl net.ipv4.ip_unprivileged_port_start=0 --security-opt seccomp=unconfined
 
     steps:
       - name: Resolve inputs
