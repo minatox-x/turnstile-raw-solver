@@ -43,7 +43,7 @@ jobs:
       - name: Start Turnstile Solver server
         working-directory: /app/solver
         run: |
-          nohup python api_solver.py --browser_type chrome --port 5072 > /app/solver.log 2>&1 &
+          nohup python api_solver.py --browser_type chrome --proxy --port 5072 > /app/solver.log 2>&1 &
           echo $! > /app/solver.pid
           echo "Waiting for server on port 5072..."
           for i in $(seq 1 30); do
