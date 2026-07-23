@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-RUN git clone https://github.com/D3-vin/Turnstile-Solver-NEW solver
+RUN git clone https://github.com/minatox-x/Turnstile-Solver-NEW solver
 RUN pip install --no-cache-dir -r solver/requirements.txt
 RUN patchright install chrome
 
