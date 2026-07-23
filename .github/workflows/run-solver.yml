@@ -42,6 +42,8 @@ jobs:
 
       - name: Start Turnstile Solver server
         working-directory: /app/solver
+        env:
+          HOME: /root
         run: |
           nohup python api.py --browser_type camoufox --proxy --port 5072 > /app/solver.log 2>&1 &
           echo $! > /app/solver.pid
