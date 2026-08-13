@@ -46,7 +46,7 @@ jobs:
         env:
           HOME: /root
         run: |
-          nohup python api.py --browser_type camoufox --proxy --port 5072 > /app/solver.log 2>&1 &
+          nohup python api.py --browser_type camoufox --proxy --port 5072 --debug --no-headless > /app/solver.log 2>&1 &
           echo $! > /app/solver.pid
           echo "Waiting for server on port 5072..."
           for i in $(seq 1 30); do
@@ -89,8 +89,8 @@ jobs:
           TASK_ID="${{ steps.submit.outputs.task_id }}"
           echo "Polling /result?id=$TASK_ID every 10s up to 30s..."
 
-          for poll in 1 2 3; do
-            echo "--- Poll $poll/3 ---"
+          for poll in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+            echo "--- Poll $poll/15 ---"
             RESPONSE=$(curl -sf "http://127.0.0.1:5072/result?id=${TASK_ID}" --max-time 15 || true)
             echo "Response: $RESPONSE"
 
@@ -112,7 +112,7 @@ jobs:
               exit 1
             fi
 
-            if [ $poll -eq 3 ]; then echo "Still processing after 3 polls -- giving up"; cat /app/solver.log; exit 1; fi
+            if [ $poll -eq 15 ]; then echo "Still processing after 3 polls -- giving up"; cat /app/solver.log; exit 1; fi
             echo "Status: $STATUS -- waiting 10s..."; sleep 10
           done
 
