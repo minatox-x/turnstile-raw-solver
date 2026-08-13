@@ -46,7 +46,7 @@ jobs:
         env:
           HOME: /root
         run: |
-          nohup python api.py --browser_type camoufox --proxy --port 5072 --debug --no-headless > /app/solver.log 2>&1 &
+          nohup python api.py --browser_type camoufox --proxy --port 5072 --debug > /app/solver.log 2>&1 &
           echo $! > /app/solver.pid
           echo "Waiting for server on port 5072..."
           for i in $(seq 1 30); do
