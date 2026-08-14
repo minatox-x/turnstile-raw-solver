@@ -89,8 +89,7 @@ jobs:
             --arg mode "turnstile" \
             --arg domain "$TARGET_URL" \
             --arg siteKey "$SITEKEY" \
-            '{mode: $mode, domain: $domain, siteKey: $siteKey}')
-
+            '{mode: $mode, domain: $domain, siteKey: $siteKey, proxy: {username: "ffcbxqmf-rotate", password: "ojvjpzxtw5ej"}}')
           echo "Payload: $PAYLOAD"
 
           RESPONSE=""
