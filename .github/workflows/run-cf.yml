@@ -1,4 +1,4 @@
-name: run-solver
+name: run-cf
 
 on:
   workflow_dispatch:
