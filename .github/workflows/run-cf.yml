@@ -1,0 +1,204 @@
+name: run-solver
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "Target URL to solve Turnstile for"
+        required: true
+        default: "https://deltastudy.site/verify"
+      sitekey:
+        description: "Cloudflare Turnstile sitekey"
+        required: true
+        default: "0x4AAAAAADnpjMgvQPlaYYog"
+  repository_dispatch:
+    types: [run-solver]
+
+jobs:
+  run-solver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository / cf-bypass
+        uses: actions/checkout@v4
+        with:
+          repository: abhinai2244/cf-bypass
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve inputs
+        id: cfg
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            TARGET_URL="${{ github.event.client_payload.target_url }}"
+            SITEKEY="${{ github.event.client_payload.sitekey }}"
+          else
+            TARGET_URL="${{ github.event.inputs.target_url }}"
+            SITEKEY="${{ github.event.inputs.sitekey }}"
+          fi
+          TARGET_URL="${TARGET_URL:-https://deltastudy.site/verify}"
+          SITEKEY="${SITEKEY:-0x4AAAAAADnpjMgvQPlaYYog}"
+          echo "target_url=$TARGET_URL" >> $GITHUB_OUTPUT
+          echo "sitekey=$SITEKEY" >> $GITHUB_OUTPUT
+
+      - name: Build Docker image
+        run: docker build -t cantarella-bypass .
+
+      - name: Run container
+        run: |
+          docker run -d -p 3000:3000 --name cantarella-bypass cantarella-bypass
+          echo "Waiting for server on port 3000..."
+          for i in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:3000/" > /dev/null 2>&1; then
+              echo "Server ready after ${i}s"; break
+            fi
+            if [ $i -eq 30 ]; then echo "Server failed to start"; docker logs cantarella-bypass; exit 1; fi
+            sleep 1
+          done
+
+      - name: Submit Turnstile task & Get Token
+        id: submit
+        run: |
+          TARGET_URL="${{ steps.cfg.outputs.target_url }}"
+          SITEKEY="${{ steps.cfg.outputs.sitekey }}"
+
+          PAYLOAD=$(jq -n \
+            --arg mode "turnstile" \
+            --arg domain "$TARGET_URL" \
+            --arg siteKey "$SITEKEY" \
+            '{mode: $mode, domain: $domain, siteKey: $siteKey}')
+
+          echo "Payload: $PAYLOAD"
+
+          RESPONSE=""
+          for attempt in 1 2 3; do
+            echo ">>> /cloudflare attempt $attempt/3"
+            RESPONSE=$(curl -s -X POST "http://127.0.0.1:3000/cloudflare" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD" \
+              --max-time 60 || true)
+            echo "Response: $RESPONSE"
+
+            CODE=$(echo "$RESPONSE" | jq -r '.code // empty')
+            TOKEN=$(echo "$RESPONSE" | jq -r '.token // empty')
+
+            if [ "$CODE" = "200" ] && [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ]; then
+              echo "Token received successfully!"
+              echo "token=$TOKEN" >> $GITHUB_OUTPUT
+              break
+            fi
+
+            if [ $attempt -eq 3 ]; then
+              echo "Failed to solve turnstile after 3 attempts"
+              docker logs cantarella-bypass
+              exit 1
+            fi
+            echo "Attempt $attempt failed -- retrying in 5s..."
+            sleep 5
+          done
+
+      - name: Verify token with deltastudy.site
+        id: verify
+        run: |
+          TOKEN="${{ steps.submit.outputs.token }}"
+          TARGET_URL="${{ steps.cfg.outputs.target_url }}"
+
+          for attempt in 1 2 3; do
+            echo ">>> verify attempt $attempt/3"
+            curl -sS -D /tmp/headers.txt -o /tmp/body.txt \
+              'https://deltastudy.site/api/turnstile/verify' \
+              -H 'accept: */*' \
+              -H 'content-type: application/json' \
+              -H 'origin: https://deltastudy.site' \
+              -H "referer: ${TARGET_URL}" \
+              -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36' \
+              --data-raw "{\"token\":\"${TOKEN}\"}" \
+              --max-time 30 && break
+
+            if [ $attempt -eq 3 ]; then echo "verify request failed after 3 attempts"; exit 1; fi
+            echo "Attempt $attempt failed -- retrying in 5s..."; sleep 5
+          done
+
+          echo "--- Response body ---"
+          cat /tmp/body.txt
+          echo "--- Response headers ---"
+          cat /tmp/headers.txt
+
+          COOKIES=$(grep -i '^set-cookie:' /tmp/headers.txt | sed 's/^[Ss]et-[Cc]ookie: //' | tr -d '\r')
+          if [ -z "$COOKIES" ]; then
+            echo "No Set-Cookie header returned -- verify likely failed"
+            exit 1
+          fi
+
+          echo "Cookies received: $COOKIES"
+          {
+            echo "cookies<<COOKIE_EOF"
+            echo "$COOKIES"
+            echo "COOKIE_EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Save session cookie to Upstash Redis
+        env:
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          REDIS_KEY: ${{ secrets.REDIS_KEY }}
+          COOKIE_VALUE: ${{ steps.verify.outputs.cookies }}
+          TOKEN_VALUE: ${{ steps.submit.outputs.token }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, sys, json, time, urllib.request
+
+          rest_url = os.environ["UPSTASH_REDIS_REST_URL"].rstrip("/")
+          rest_token = os.environ["UPSTASH_REDIS_REST_TOKEN"]
+          key = os.environ.get("REDIS_KEY") or "deltastudy:session"
+          cookie_value = os.environ.get("COOKIE_VALUE", "")
+
+          if not cookie_value:
+              print("No cookie value to store -- aborting")
+              sys.exit(1)
+
+          payload = {
+              "cookies": cookie_value,
+              "token": os.environ.get("TOKEN_VALUE", ""),
+              "updated_at": int(time.time()),
+          }
+
+          body = json.dumps(["SET", key, json.dumps(payload)]).encode()
+          req = urllib.request.Request(
+              f"{rest_url}/",
+              data=body,
+              method="POST",
+              headers={
+                  "Authorization": f"Bearer {rest_token}",
+                  "Content-Type": "application/json",
+              },
+          )
+
+          with urllib.request.urlopen(req, timeout=15) as resp:
+              result = json.loads(resp.read().decode())
+
+          if result.get("result") != "OK":
+              print(f"Unexpected Upstash response: {result}")
+              sys.exit(1)
+
+          print(f"Stored session under key '{key}':")
+          print(json.dumps(payload, indent=2))
+          PYEOF
+
+      - name: Action complete
+        run: |
+          echo "=========================================="
+          echo "  Turnstile solved & verified successfully!"
+          echo "  token   : ${{ steps.submit.outputs.token }}"
+          echo "  cookies : stored in Upstash Redis"
+          echo "=========================================="
+
+      - name: Print container logs
+        if: always()
+        run: docker logs cantarella-bypass || true
+
+      - name: Stop solver container
+        if: always()
+        run: |
+          docker stop cantarella-bypass || true
+          docker rm cantarella-bypass || true
