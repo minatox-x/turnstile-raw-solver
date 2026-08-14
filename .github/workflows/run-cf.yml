@@ -46,10 +46,10 @@ jobs:
 
       - name: Run container
         run: |
-          docker run -d -p 3000:3000 --name cantarella-bypass cantarella-bypass
-          echo "Waiting for server on port 3000..."
+          docker run -d -p 8742:8742 --name cantarella-bypass cantarella-bypass
+          echo "Waiting for server on port 8742..."
           for i in $(seq 1 30); do
-            if curl -sf "http://127.0.0.1:3000/" > /dev/null 2>&1; then
+            if curl -sf "http://127.0.0.1:8742/" > /dev/null 2>&1; then
               echo "Server ready after ${i}s"; break
             fi
             if [ $i -eq 30 ]; then echo "Server failed to start"; docker logs cantarella-bypass; exit 1; fi
@@ -73,7 +73,7 @@ jobs:
           RESPONSE=""
           for attempt in 1 2 3; do
             echo ">>> /cloudflare attempt $attempt/3"
-            RESPONSE=$(curl -s -X POST "http://127.0.0.1:3000/cloudflare" \
+            RESPONSE=$(curl -s -X POST "http://127.0.0.1:8742/cloudflare" \
               -H "Content-Type: application/json" \
               -d "$PAYLOAD" \
               --max-time 60 || true)
