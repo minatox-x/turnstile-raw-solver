@@ -1,4 +1,4 @@
-name: run-cf
+name: run-solver
 
 on:
   workflow_dispatch:
@@ -12,10 +12,10 @@ on:
         required: true
         default: "0x4AAAAAADnpjMgvQPlaYYog"
   repository_dispatch:
-    types: [run-cf]
+    types: [run-solver]
 
 jobs:
-  run-cf:
+  run-solver:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
