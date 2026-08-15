@@ -63,11 +63,9 @@ jobs:
 
       - name: Run container
         run: |
-          # Added --name turnstile-solver so Docker tracks it properly
           docker run -d --name turnstile-solver -p 407:407 turnstile-solver:latest
           echo "Waiting for container to be alive..."
           for i in $(seq 1 30); do
-            # Fixed container name reference from cantarella-bypass to turnstile-solver
             if [ "$(docker inspect -f '{{.State.Running}}' turnstile-solver 2>/dev/null)" = "true" ]; then
               echo "Container is running after ${i}s"
               sleep 3
@@ -88,25 +86,22 @@ jobs:
           SITEKEY="${{ steps.cfg.outputs.sitekey }}"
 
           PAYLOAD=$(jq -n \
-            --arg mode "turnstile" \
             --arg domain "$TARGET_URL" \
             --arg siteKey "$SITEKEY" \
-            '{mode: $mode, url: $domain, sitekey: $siteKey}')
+            '{url: $domain, sitekey: $siteKey}')
           echo "Payload: $PAYLOAD"
 
           RESPONSE=""
           for attempt in 1 2 3; do
-            echo ">>> /cloudflare attempt $attempt/3"
-            RESPONSE=$(curl -s -X POST "http://127.0.0.1:407/cloudflare" \
+            echo ">>> /turnstile attempt $attempt/3"
+            RESPONSE=$(curl -s -X POST "http://127.0.0.1:407/turnstile" \
               -H "Content-Type: application/json" \
               -d "$PAYLOAD" \
               --max-time 60 || true)
             echo "Response: $RESPONSE"
 
-            CODE=$(echo "$RESPONSE" | jq -r '.code // empty')
             TOKEN=$(echo "$RESPONSE" | jq -r '.token // empty')
 
-            # Ensure proper field checks based on your application response structure
             if [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ]; then
               echo "Token received successfully!"
               echo "token=$TOKEN" >> $GITHUB_OUTPUT
