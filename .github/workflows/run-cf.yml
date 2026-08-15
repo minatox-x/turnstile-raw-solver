@@ -23,7 +23,7 @@ jobs:
       - name: Checkout repository / cf-bypass
         uses: actions/checkout@v4
         with:
-          repository: abhinai2244/cf-bypass
+          repository: B00H0O/cloudflare-solver
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
@@ -42,7 +42,7 @@ jobs:
         with:
           context: .
           load: true
-          tags: cantarella-bypass:latest
+          tags: turnstile-solver:latest
           cache-from: type=local,src=/tmp/.docker-cache
           cache-to: type=local,dest=/tmp/.docker-cache,mode=max
 
@@ -63,7 +63,7 @@ jobs:
 
       - name: Run container
         run: |
-          docker run -d -p 8742:8742 --name cantarella-bypass cantarella-bypass:latest
+          docker run -d -p 407:407 turnstile-solver:latest
           echo "Waiting for container to be alive..."
           for i in $(seq 1 30); do
             if [ "$(docker inspect -f '{{.State.Running}}' cantarella-bypass 2>/dev/null)" = "true" ]; then
@@ -73,7 +73,7 @@ jobs:
             fi
             if [ $i -eq 30 ]; then 
               echo "Container failed to stay running"
-              docker logs cantarella-bypass 
+              docker logs turnstile-solver
               exit 1 
             fi
             sleep 1
@@ -89,7 +89,7 @@ jobs:
             --arg mode "turnstile" \
             --arg domain "$TARGET_URL" \
             --arg siteKey "$SITEKEY" \
-            '{mode: $mode, domain: $domain, siteKey: $siteKey, proxy: {username: "ffcbxqmf-rotate", password: "ojvjpzxtw5ej"}}')
+            '{mode: $mode, url: $domain, sitekey: $siteKey}')
           echo "Payload: $PAYLOAD"
 
           RESPONSE=""
@@ -104,7 +104,7 @@ jobs:
             CODE=$(echo "$RESPONSE" | jq -r '.code // empty')
             TOKEN=$(echo "$RESPONSE" | jq -r '.token // empty')
 
-            if [ "$CODE" = "200" ] && [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ]; then
+            if [ "$STATUS" = "completed" ] && [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ]; then
               echo "Token received successfully!"
               echo "token=$TOKEN" >> $GITHUB_OUTPUT
               break
@@ -112,7 +112,7 @@ jobs:
 
             if [ $attempt -eq 3 ]; then
               echo "Failed to solve turnstile after 3 attempts"
-              docker logs cantarella-bypass
+              docker logs turnstile-solver
               exit 1
             fi
             echo "Attempt $attempt failed -- retrying in 5s..."
@@ -217,10 +217,10 @@ jobs:
 
       - name: Print container logs
         if: always()
-        run: docker logs cantarella-bypass || true
+        run: docker logs turnstile-solver || true
 
       - name: Stop solver container
         if: always()
         run: |
-          docker stop cantarella-bypass || true
-          docker rm cantarella-bypass || true
+          docker stop turnstile-solver || true
+          docker rm turnstile-solver || true
