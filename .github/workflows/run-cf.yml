@@ -6,11 +6,11 @@ on:
       target_url:
         description: "Target URL to solve Turnstile for"
         required: true
-        default: "https://deltastudy.site/verify"
+        default: "https://deltastudy.fun/verify"
       sitekey:
         description: "Cloudflare Turnstile sitekey"
         required: true
-        default: "0x4AAAAAADnpjMgvQPlaYYog"
+        default: "0x4AAAAAAElJ9c3DoijxSXaC"
   repository_dispatch:
     types: [run-cf]
 
