@@ -56,8 +56,8 @@ jobs:
             TARGET_URL="${{ github.event.inputs.target_url }}"
             SITEKEY="${{ github.event.inputs.sitekey }}"
           fi
-          TARGET_URL="${TARGET_URL:-https://deltastudy.site/verify}"
-          SITEKEY="${SITEKEY:-0x4AAAAAADnpjMgvQPlaYYog}"
+          TARGET_URL="${TARGET_URL:-https://deltastudy.fun/verify}"
+          SITEKEY="${SITEKEY:-0x4AAAAAAElJ9c3DoijxSXaC}"
           echo "target_url=$TARGET_URL" >> $GITHUB_OUTPUT
           echo "sitekey=$SITEKEY" >> $GITHUB_OUTPUT
 
@@ -117,7 +117,7 @@ jobs:
             sleep 5
           done
 
-      - name: Verify token with deltastudy.site
+      - name: Verify token with deltastudy.fun
         id: verify
         run: |
           TOKEN="${{ steps.submit.outputs.token }}"
@@ -126,10 +126,10 @@ jobs:
           for attempt in 1 2 3; do
             echo ">>> verify attempt $attempt/3"
             curl -sS -D /tmp/headers.txt -o /tmp/body.txt \
-              'https://deltastudy.site/api/turnstile/verify' \
+              'https://deltastudy.fun/api/turnstile/verify' \
               -H 'accept: */*' \
               -H 'content-type: application/json' \
-              -H 'origin: https://deltastudy.site' \
+              -H 'origin: https://deltastudy.fun' \
               -H "referer: ${TARGET_URL}" \
               -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36' \
               --data-raw "{\"token\":\"${TOKEN}\"}" \
