@@ -88,7 +88,7 @@ jobs:
           PAYLOAD=$(jq -n \
             --arg domain "$TARGET_URL" \
             --arg siteKey "$SITEKEY" \
-            '{url: $domain, sitekey: $siteKey, proxy: "http://ffcbxqmf-rotate:ojvjpzxtw5ej@p.webshare.io:80"}')
+            '{url: $domain, sitekey: $siteKey, proxy: "http://cnvpnlnk-rotate:so5vwbj9flp3@p.webshare.io:80"}')
           echo "Payload: $PAYLOAD"
 
           RESPONSE=""
