@@ -79,6 +79,10 @@ jobs:
             sleep 1
           done
 
+      # ─────────────────────────────────────────────────────────────
+      #  MAIN: deltastudy.fun
+      # ─────────────────────────────────────────────────────────────
+
       - name: Submit Turnstile task & Get Token
         id: submit
         run: |
@@ -157,7 +161,7 @@ jobs:
             echo "COOKIE_EOF"
           } >> $GITHUB_OUTPUT
 
-      - name: Save session cookie to Upstash Redis
+      - name: Save deltastudy session cookie to Upstash Redis
         env:
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
@@ -201,16 +205,178 @@ jobs:
               print(f"Unexpected Upstash response: {result}")
               sys.exit(1)
 
-          print(f"Stored session under key '{key}':")
+          print(f"Stored deltastudy session under key '{key}':")
           print(json.dumps(payload, indent=2))
           PYEOF
 
-      - name: Action complete
+      - name: Action complete (deltastudy)
         run: |
           echo "=========================================="
-          echo "  Turnstile solved & verified successfully!"
+          echo "  deltastudy.fun: Solved & verified!"
           echo "  token   : ${{ steps.submit.outputs.token }}"
           echo "  cookies : stored in Upstash Redis"
+          echo "=========================================="
+
+      # ─────────────────────────────────────────────────────────────
+      #  BUDDY: deltaverse.site  (always runs, never blocks main)
+      # ─────────────────────────────────────────────────────────────
+
+      - name: "[Buddy] Submit Turnstile for deltaverse.site"
+        id: dv_submit
+        if: always()
+        run: |
+          DV_URL="https://pw.deltaverse.site/verifycf"
+          DV_SITEKEY="0x4AAAAAAENNbymrakr0v3o7"
+
+          PAYLOAD=$(jq -n \
+            --arg domain "$DV_URL" \
+            --arg siteKey "$DV_SITEKEY" \
+            '{url: $domain, sitekey: $siteKey, proxy: "http://cnvpnlnk-rotate:so5vwbj9flp3@p.webshare.io:80"}')
+          echo "Payload: $PAYLOAD"
+
+          DV_TOKEN=""
+          for attempt in 1 2 3; do
+            echo ">>> [buddy] /turnstile attempt $attempt/3"
+            RESPONSE=$(curl -s -X POST "http://127.0.0.1:407/turnstile" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD" \
+              --max-time 60 || true)
+            echo "Response: $RESPONSE"
+
+            DV_TOKEN=$(echo "$RESPONSE" | jq -r '.token // empty')
+
+            if [ -n "$DV_TOKEN" ] && [ "$DV_TOKEN" != "null" ]; then
+              echo "Deltaverse token received!"
+              echo "dv_token=$DV_TOKEN" >> $GITHUB_OUTPUT
+              break
+            fi
+
+            if [ $attempt -eq 3 ]; then
+              echo "[buddy] Failed to get deltaverse token after 3 attempts -- continuing anyway"
+              echo "dv_token=" >> $GITHUB_OUTPUT
+            fi
+            echo "Attempt $attempt failed -- retrying in 5s..."
+            sleep 5
+          done
+
+      - name: "[Buddy] Verify token with deltaverse.site"
+        id: dv_verify
+        if: always()
+        run: |
+          DV_TOKEN="${{ steps.dv_submit.outputs.dv_token }}"
+
+          if [ -z "$DV_TOKEN" ]; then
+            echo "[buddy] No deltaverse token -- skipping verify"
+            echo "dv_cookies=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          for attempt in 1 2 3; do
+            echo ">>> [buddy] verify attempt $attempt/3"
+            curl -sS -D /tmp/dv_headers.txt -o /tmp/dv_body.txt \
+              'https://pw.deltaverse.site/api/verify/challenge' \
+              -H 'accept: */*' \
+              -H 'accept-language: en-US,en;q=0.9,en-IN;q=0.8' \
+              -H 'cache-control: no-cache' \
+              -H 'content-type: application/json' \
+              -H 'origin: https://pw.deltaverse.site' \
+              -H 'pragma: no-cache' \
+              -H 'priority: u=1, i' \
+              -H 'referer: https://pw.deltaverse.site/verifycf?nextRedirect=%2Fstudy' \
+              -H 'sec-ch-ua: "Microsoft Edge";v="153", "Not_A Brand";v="8", "Chromium";v="153"' \
+              -H 'sec-ch-ua-mobile: ?0' \
+              -H 'sec-ch-ua-platform: "Windows"' \
+              -H 'sec-fetch-dest: empty' \
+              -H 'sec-fetch-mode: cors' \
+              -H 'sec-fetch-site: same-origin' \
+              -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0' \
+              --data-raw "{\"token\":\"${DV_TOKEN}\"}" \
+              --max-time 30 && break
+
+            if [ $attempt -eq 3 ]; then
+              echo "[buddy] verify request failed after 3 attempts -- continuing anyway"
+              echo "dv_cookies=" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "Attempt $attempt failed -- retrying in 5s..."; sleep 5
+          done
+
+          echo "--- [buddy] Response body ---"
+          cat /tmp/dv_body.txt
+          echo "--- [buddy] Response headers ---"
+          cat /tmp/dv_headers.txt
+
+          DV_COOKIES=$(grep -i '^set-cookie:' /tmp/dv_headers.txt | sed 's/^[Ss]et-[Cc]ookie: //' | tr -d '\r')
+          if [ -z "$DV_COOKIES" ]; then
+            echo "[buddy] No Set-Cookie header -- verify likely failed, continuing anyway"
+            echo "dv_cookies=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Deltaverse cookies received: $DV_COOKIES"
+          {
+            echo "dv_cookies<<COOKIE_EOF"
+            echo "$DV_COOKIES"
+            echo "COOKIE_EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: "[Buddy] Save deltaverse session cookie to Upstash Redis"
+        if: always()
+        env:
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          DV_COOKIE_VALUE: ${{ steps.dv_verify.outputs.dv_cookies }}
+          DV_TOKEN_VALUE: ${{ steps.dv_submit.outputs.dv_token }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, sys, json, time, urllib.request
+
+          rest_url = os.environ["UPSTASH_REDIS_REST_URL"].rstrip("/")
+          rest_token = os.environ["UPSTASH_REDIS_REST_TOKEN"]
+          key = "deltaverse:session"
+          cookie_value = os.environ.get("DV_COOKIE_VALUE", "")
+
+          if not cookie_value:
+              print("[buddy] No deltaverse cookie value to store -- skipping")
+              sys.exit(0)
+
+          payload = {
+              "cookies": cookie_value,
+              "token": os.environ.get("DV_TOKEN_VALUE", ""),
+              "updated_at": int(time.time()),
+          }
+
+          body = json.dumps(["SET", key, json.dumps(payload)]).encode()
+          req = urllib.request.Request(
+              f"{rest_url}/",
+              data=body,
+              method="POST",
+              headers={
+                  "Authorization": f"Bearer {rest_token}",
+                  "Content-Type": "application/json",
+              },
+          )
+
+          try:
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  result = json.loads(resp.read().decode())
+              if result.get("result") != "OK":
+                  print(f"[buddy] Unexpected Upstash response: {result}")
+                  sys.exit(0)
+              print(f"[buddy] Stored deltaverse session under key '{key}':")
+              print(json.dumps(payload, indent=2))
+          except Exception as e:
+              print(f"[buddy] Redis store failed: {e} -- continuing anyway")
+          PYEOF
+
+      - name: Action complete (summary)
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "  deltastudy.fun  : token=${{ steps.submit.outputs.token }}"
+          echo "  deltaverse.site : token=${{ steps.dv_submit.outputs.dv_token }}"
+          echo "  Both sessions stored in Upstash Redis"
+          echo "  Keys: deltastudy:session  |  deltaverse:session"
           echo "=========================================="
 
       - name: Print container logs
