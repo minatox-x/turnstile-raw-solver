@@ -6,27 +6,21 @@ on:
       target_url:
         description: "Target URL to solve Turnstile for"
         required: true
-        default: "https://pw.deltaverse.site/verifycf"
+        default: "https://deltastudy.fun/verify"
       sitekey:
         description: "Cloudflare Turnstile sitekey"
         required: true
-        default: "0x4AAAAAAENNbymrakr0v3o7"
+        default: "0x4AAAAAAElJ9c3DoijxSXaC"
   repository_dispatch:
     types: [run-cf]
 
 jobs:
-  # ─────────────────────────────────────────────────────────────────────────────
-  #  JOB 1 – Build & push image to GitHub Container Registry (cached)
-  #  This job runs once and caches the image so the solve job starts instantly.
-  # ─────────────────────────────────────────────────────────────────────────────
-  build:
+  run-cf:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      image: ${{ steps.meta.outputs.image }}
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout cf-bypass repository
+      - name: Checkout repository / cf-bypass
         uses: actions/checkout@v4
         with:
           repository: B00H0O/cloudflare-solver
@@ -35,49 +29,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+      - name: Cache Docker layers
+        uses: actions/cache@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.CR_PAT }}
+          path: /tmp/.docker-cache
+          key: ${{ runner.os }}-docker-${{ hashFiles('**/Dockerfile', '**/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-docker-
 
-      - name: Derive image name
-        id: meta
-        run: |
-          IMAGE="ghcr.io/${{ github.repository_owner }}/turnstile-solver:latest"
-          echo "image=$IMAGE" >> $GITHUB_OUTPUT
-
-      - name: Build & push (registry cache — instant on cache hit)
+      - name: Build Docker image with caching
         uses: docker/build-push-action@v5
         with:
           context: .
-          push: true
-          tags: ${{ steps.meta.outputs.image }}
-          cache-from: type=registry,ref=${{ steps.meta.outputs.image }}-cache
-          cache-to:   type=registry,ref=${{ steps.meta.outputs.image }}-cache,mode=max
+          load: true
+          tags: turnstile-solver:latest
+          cache-from: type=local,src=/tmp/.docker-cache
+          cache-to: type=local,dest=/tmp/.docker-cache,mode=max
 
-  # ─────────────────────────────────────────────────────────────────────────────
-  #  JOB 2 – Solve Turnstile & store session  (depends on build)
-  # ─────────────────────────────────────────────────────────────────────────────
-  run-cf:
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      # ── Pull pre-built image ──────────────────────────────────────────────
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.CR_PAT }}
-
-      - name: Pull solver image
-        run: docker pull ${{ needs.build.outputs.image }}
-
-      # ── Resolve inputs ────────────────────────────────────────────────────
       - name: Resolve inputs
         id: cfg
         run: |
@@ -88,37 +56,46 @@ jobs:
             TARGET_URL="${{ github.event.inputs.target_url }}"
             SITEKEY="${{ github.event.inputs.sitekey }}"
           fi
-          TARGET_URL="${TARGET_URL:-https://pw.deltaverse.site/verifycf}"
-          SITEKEY="${SITEKEY:-0x4AAAAAAENNbymrakr0v3o7}"
+          TARGET_URL="${TARGET_URL:-https://deltastudy.fun/verify}"
+          SITEKEY="${SITEKEY:-0x4AAAAAAElJ9c3DoijxSXaC}"
           echo "target_url=$TARGET_URL" >> $GITHUB_OUTPUT
-          echo "sitekey=$SITEKEY"       >> $GITHUB_OUTPUT
+          echo "sitekey=$SITEKEY" >> $GITHUB_OUTPUT
 
-      # ── Start solver container ────────────────────────────────────────────
-      - name: Start solver container
+      - name: Run container
         run: |
-          docker run -d --name turnstile-solver -p 407:407 ${{ needs.build.outputs.image }}
-          echo "Waiting for container..."
+          docker run -d --name turnstile-solver -p 407:407 turnstile-solver:latest
+          echo "Waiting for container to be alive..."
           for i in $(seq 1 30); do
             if [ "$(docker inspect -f '{{.State.Running}}' turnstile-solver 2>/dev/null)" = "true" ]; then
-              echo "Container running after ${i}s"; sleep 3; break
+              echo "Container is running after ${i}s"
+              sleep 3
+              break
             fi
-            [ $i -eq 30 ] && { echo "Container failed to start"; docker logs turnstile-solver; exit 1; }
+            if [ $i -eq 30 ]; then 
+              echo "Container failed to stay running"
+              docker logs turnstile-solver
+              exit 1 
+            fi
             sleep 1
           done
 
-      # ── Submit Turnstile task ─────────────────────────────────────────────
-      - name: Submit Turnstile task & get token
+      # ─────────────────────────────────────────────────────────────
+      #  MAIN: deltastudy.fun
+      # ─────────────────────────────────────────────────────────────
+
+      - name: Submit Turnstile task & Get Token
         id: submit
         run: |
           TARGET_URL="${{ steps.cfg.outputs.target_url }}"
           SITEKEY="${{ steps.cfg.outputs.sitekey }}"
 
           PAYLOAD=$(jq -n \
-            --arg domain  "$TARGET_URL" \
+            --arg domain "$TARGET_URL" \
             --arg siteKey "$SITEKEY" \
             '{url: $domain, sitekey: $siteKey, proxy: "http://khiowtep-rotate:tfjkivqrxud0@p.webshare.io:80"}')
           echo "Payload: $PAYLOAD"
 
+          RESPONSE=""
           for attempt in 1 2 3; do
             echo ">>> /turnstile attempt $attempt/3"
             RESPONSE=$(curl -s -X POST "http://127.0.0.1:407/turnstile" \
@@ -128,45 +105,41 @@ jobs:
             echo "Response: $RESPONSE"
 
             TOKEN=$(echo "$RESPONSE" | jq -r '.token // empty')
+
             if [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ]; then
-              echo "Token received!"
+              echo "Token received successfully!"
               echo "token=$TOKEN" >> $GITHUB_OUTPUT
               break
             fi
 
-            [ $attempt -eq 3 ] && { echo "Failed after 3 attempts"; docker logs turnstile-solver; exit 1; }
-            echo "Attempt $attempt failed -- retrying in 5s..."; sleep 5
+            if [ $attempt -eq 3 ]; then
+              echo "Failed to solve turnstile after 3 attempts"
+              docker logs turnstile-solver
+              exit 1
+            fi
+            echo "Attempt $attempt failed -- retrying in 5s..."
+            sleep 5
           done
 
-      # ── Verify token with deltaverse.site ─────────────────────────────────
-      - name: Verify token with deltaverse.site
+      - name: Verify token with deltastudy.fun
         id: verify
         run: |
           TOKEN="${{ steps.submit.outputs.token }}"
+          TARGET_URL="${{ steps.cfg.outputs.target_url }}"
 
           for attempt in 1 2 3; do
             echo ">>> verify attempt $attempt/3"
             curl -sS -D /tmp/headers.txt -o /tmp/body.txt \
-              'https://pw.deltaverse.site/api/verify/challenge' \
+              'https://deltastudy.fun/api/turnstile/verify' \
               -H 'accept: */*' \
-              -H 'accept-language: en-US,en;q=0.9,en-IN;q=0.8' \
-              -H 'cache-control: no-cache' \
               -H 'content-type: application/json' \
-              -H 'origin: https://pw.deltaverse.site' \
-              -H 'pragma: no-cache' \
-              -H 'priority: u=1, i' \
-              -H 'referer: https://pw.deltaverse.site/verifycf?nextRedirect=%2Fstudy' \
-              -H 'sec-ch-ua: "Microsoft Edge";v="153", "Not_A Brand";v="8", "Chromium";v="153"' \
-              -H 'sec-ch-ua-mobile: ?0' \
-              -H 'sec-ch-ua-platform: "Windows"' \
-              -H 'sec-fetch-dest: empty' \
-              -H 'sec-fetch-mode: cors' \
-              -H 'sec-fetch-site: same-origin' \
-              -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0' \
+              -H 'origin: https://deltastudy.fun' \
+              -H "referer: ${TARGET_URL}" \
+              -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36' \
               --data-raw "{\"token\":\"${TOKEN}\"}" \
               --max-time 30 && break
 
-            [ $attempt -eq 3 ] && { echo "Verify failed after 3 attempts"; exit 1; }
+            if [ $attempt -eq 3 ]; then echo "verify request failed after 3 attempts"; exit 1; fi
             echo "Attempt $attempt failed -- retrying in 5s..."; sleep 5
           done
 
@@ -177,7 +150,7 @@ jobs:
 
           COOKIES=$(grep -i '^set-cookie:' /tmp/headers.txt | sed 's/^[Ss]et-[Cc]ookie: //' | tr -d '\r')
           if [ -z "$COOKIES" ]; then
-            echo "No Set-Cookie header -- verify likely failed"
+            echo "No Set-Cookie header returned -- verify likely failed"
             exit 1
           fi
 
@@ -188,20 +161,20 @@ jobs:
             echo "COOKIE_EOF"
           } >> $GITHUB_OUTPUT
 
-      # ── Store session in Upstash Redis ────────────────────────────────────
-      - name: Save deltaverse session to Upstash Redis
+      - name: Save deltastudy session cookie to Upstash Redis
         env:
-          UPSTASH_REDIS_REST_URL:   ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          REDIS_KEY: ${{ secrets.REDIS_KEY }}
           COOKIE_VALUE: ${{ steps.verify.outputs.cookies }}
-          TOKEN_VALUE:  ${{ steps.submit.outputs.token }}
+          TOKEN_VALUE: ${{ steps.submit.outputs.token }}
         run: |
           python3 - << 'PYEOF'
           import os, sys, json, time, urllib.request
 
-          rest_url   = os.environ["UPSTASH_REDIS_REST_URL"].rstrip("/")
+          rest_url = os.environ["UPSTASH_REDIS_REST_URL"].rstrip("/")
           rest_token = os.environ["UPSTASH_REDIS_REST_TOKEN"]
-          key          = "deltaverse:session"
+          key = os.environ.get("REDIS_KEY") or "deltastudy:session"
           cookie_value = os.environ.get("COOKIE_VALUE", "")
 
           if not cookie_value:
@@ -209,13 +182,13 @@ jobs:
               sys.exit(1)
 
           payload = {
-              "cookies":    cookie_value,
-              "token":      os.environ.get("TOKEN_VALUE", ""),
+              "cookies": cookie_value,
+              "token": os.environ.get("TOKEN_VALUE", ""),
               "updated_at": int(time.time()),
           }
 
           body = json.dumps(["SET", key, json.dumps(payload)]).encode()
-          req  = urllib.request.Request(
+          req = urllib.request.Request(
               f"{rest_url}/",
               data=body,
               method="POST",
@@ -232,19 +205,178 @@ jobs:
               print(f"Unexpected Upstash response: {result}")
               sys.exit(1)
 
-          print(f"Stored deltaverse session under key '{key}':")
+          print(f"Stored deltastudy session under key '{key}':")
           print(json.dumps(payload, indent=2))
           PYEOF
 
-      # ── Summary ───────────────────────────────────────────────────────────
-      - name: Summary
+      - name: Action complete (deltastudy)
+        run: |
+          echo "=========================================="
+          echo "  deltastudy.fun: Solved & verified!"
+          echo "  token   : ${{ steps.submit.outputs.token }}"
+          echo "  cookies : stored in Upstash Redis"
+          echo "=========================================="
+
+      # ─────────────────────────────────────────────────────────────
+      #  BUDDY: deltaverse.site  (always runs, never blocks main)
+      # ─────────────────────────────────────────────────────────────
+
+      - name: "[Buddy] Submit Turnstile for deltaverse.site"
+        id: dv_submit
+        if: always()
+        run: |
+          DV_URL="https://pw.deltaverse.site/verifycf"
+          DV_SITEKEY="0x4AAAAAAENNbymrakr0v3o7"
+
+          PAYLOAD=$(jq -n \
+            --arg domain "$DV_URL" \
+            --arg siteKey "$DV_SITEKEY" \
+            '{url: $domain, sitekey: $siteKey, proxy: "http://khiowtep-rotate:tfjkivqrxud0@p.webshare.io:80"}')
+          echo "Payload: $PAYLOAD"
+
+          DV_TOKEN=""
+          for attempt in 1 2 3; do
+            echo ">>> [buddy] /turnstile attempt $attempt/3"
+            RESPONSE=$(curl -s -X POST "http://127.0.0.1:407/turnstile" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD" \
+              --max-time 60 || true)
+            echo "Response: $RESPONSE"
+
+            DV_TOKEN=$(echo "$RESPONSE" | jq -r '.token // empty')
+
+            if [ -n "$DV_TOKEN" ] && [ "$DV_TOKEN" != "null" ]; then
+              echo "Deltaverse token received!"
+              echo "dv_token=$DV_TOKEN" >> $GITHUB_OUTPUT
+              break
+            fi
+
+            if [ $attempt -eq 3 ]; then
+              echo "[buddy] Failed to get deltaverse token after 3 attempts -- continuing anyway"
+              echo "dv_token=" >> $GITHUB_OUTPUT
+            fi
+            echo "Attempt $attempt failed -- retrying in 5s..."
+            sleep 5
+          done
+
+      - name: "[Buddy] Verify token with deltaverse.site"
+        id: dv_verify
+        if: always()
+        run: |
+          DV_TOKEN="${{ steps.dv_submit.outputs.dv_token }}"
+
+          if [ -z "$DV_TOKEN" ]; then
+            echo "[buddy] No deltaverse token -- skipping verify"
+            echo "dv_cookies=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          for attempt in 1 2 3; do
+            echo ">>> [buddy] verify attempt $attempt/3"
+            curl -sS -D /tmp/dv_headers.txt -o /tmp/dv_body.txt \
+              'https://pw.deltaverse.site/api/verify/challenge' \
+              -H 'accept: */*' \
+              -H 'accept-language: en-US,en;q=0.9,en-IN;q=0.8' \
+              -H 'cache-control: no-cache' \
+              -H 'content-type: application/json' \
+              -H 'origin: https://pw.deltaverse.site' \
+              -H 'pragma: no-cache' \
+              -H 'priority: u=1, i' \
+              -H 'referer: https://pw.deltaverse.site/verifycf?nextRedirect=%2Fstudy' \
+              -H 'sec-ch-ua: "Microsoft Edge";v="153", "Not_A Brand";v="8", "Chromium";v="153"' \
+              -H 'sec-ch-ua-mobile: ?0' \
+              -H 'sec-ch-ua-platform: "Windows"' \
+              -H 'sec-fetch-dest: empty' \
+              -H 'sec-fetch-mode: cors' \
+              -H 'sec-fetch-site: same-origin' \
+              -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0' \
+              --data-raw "{\"token\":\"${DV_TOKEN}\"}" \
+              --max-time 30 && break
+
+            if [ $attempt -eq 3 ]; then
+              echo "[buddy] verify request failed after 3 attempts -- continuing anyway"
+              echo "dv_cookies=" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "Attempt $attempt failed -- retrying in 5s..."; sleep 5
+          done
+
+          echo "--- [buddy] Response body ---"
+          cat /tmp/dv_body.txt
+          echo "--- [buddy] Response headers ---"
+          cat /tmp/dv_headers.txt
+
+          DV_COOKIES=$(grep -i '^set-cookie:' /tmp/dv_headers.txt | sed 's/^[Ss]et-[Cc]ookie: //' | tr -d '\r')
+          if [ -z "$DV_COOKIES" ]; then
+            echo "[buddy] No Set-Cookie header -- verify likely failed, continuing anyway"
+            echo "dv_cookies=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Deltaverse cookies received: $DV_COOKIES"
+          {
+            echo "dv_cookies<<COOKIE_EOF"
+            echo "$DV_COOKIES"
+            echo "COOKIE_EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: "[Buddy] Save deltaverse session cookie to Upstash Redis"
+        if: always()
+        env:
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          DV_COOKIE_VALUE: ${{ steps.dv_verify.outputs.dv_cookies }}
+          DV_TOKEN_VALUE: ${{ steps.dv_submit.outputs.dv_token }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, sys, json, time, urllib.request
+
+          rest_url = os.environ["UPSTASH_REDIS_REST_URL"].rstrip("/")
+          rest_token = os.environ["UPSTASH_REDIS_REST_TOKEN"]
+          key = "deltaverse:session"
+          cookie_value = os.environ.get("DV_COOKIE_VALUE", "")
+
+          if not cookie_value:
+              print("[buddy] No deltaverse cookie value to store -- skipping")
+              sys.exit(0)
+
+          payload = {
+              "cookies": cookie_value,
+              "token": os.environ.get("DV_TOKEN_VALUE", ""),
+              "updated_at": int(time.time()),
+          }
+
+          body = json.dumps(["SET", key, json.dumps(payload)]).encode()
+          req = urllib.request.Request(
+              f"{rest_url}/",
+              data=body,
+              method="POST",
+              headers={
+                  "Authorization": f"Bearer {rest_token}",
+                  "Content-Type": "application/json",
+              },
+          )
+
+          try:
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  result = json.loads(resp.read().decode())
+              if result.get("result") != "OK":
+                  print(f"[buddy] Unexpected Upstash response: {result}")
+                  sys.exit(0)
+              print(f"[buddy] Stored deltaverse session under key '{key}':")
+              print(json.dumps(payload, indent=2))
+          except Exception as e:
+              print(f"[buddy] Redis store failed: {e} -- continuing anyway")
+          PYEOF
+
+      - name: Action complete (summary)
         if: always()
         run: |
           echo "=========================================="
-          echo "  deltaverse.site : Solved & verified!"
-          echo "  token   : ${{ steps.submit.outputs.token }}"
-          echo "  cookies : stored in Upstash Redis"
-          echo "  key     : deltaverse:session"
+          echo "  deltastudy.fun  : token=${{ steps.submit.outputs.token }}"
+          echo "  deltaverse.site : token=${{ steps.dv_submit.outputs.dv_token }}"
+          echo "  Both sessions stored in Upstash Redis"
+          echo "  Keys: deltastudy:session  |  deltaverse:session"
           echo "=========================================="
 
       - name: Print container logs
@@ -255,4 +387,4 @@ jobs:
         if: always()
         run: |
           docker stop turnstile-solver || true
-          docker rm   turnstile-solver || true
+          docker rm turnstile-solver || true
