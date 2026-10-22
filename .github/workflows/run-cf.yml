@@ -225,7 +225,7 @@ jobs:
         id: dv_submit
         if: always()
         run: |
-          DV_URL="https://pw.deltaverse.site/verifycf"
+          DV_URL="https://pw.deltaverse.site/"
           DV_SITEKEY="0x4AAAAAAENNbymrakr0v3o7"
 
           PAYLOAD=$(jq -n \
@@ -274,7 +274,7 @@ jobs:
           for attempt in 1 2 3; do
             echo ">>> [buddy] verify attempt $attempt/3"
             curl -sS -D /tmp/dv_headers.txt -o /tmp/dv_body.txt \
-              'https://pw.deltaverse.site/api/verify/challenge' \
+              'https://pw.deltaverse.site/api/verify/turnstile' \
               -H 'accept: */*' \
               -H 'accept-language: en-US,en;q=0.9,en-IN;q=0.8' \
               -H 'cache-control: no-cache' \
