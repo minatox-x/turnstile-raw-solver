@@ -71,91 +71,13 @@ jobs:
               sleep 3
               break
             fi
-            if [ $i -eq 30 ]; then
+            if [ $i -eq 30 ]; then 
               echo "Container failed to stay running"
               docker logs turnstile-solver
-              exit 1
+              exit 1 
             fi
             sleep 1
           done
-
-      # ─────────────────────────────────────────────────────────────
-      #  PROXY: Find a residential proxy for Turnstile submissions
-      #  Uses deltacookie.vercel.app; re-fetches up to 10 cycles.
-      #  ip-api.com hosting=false  →  residential (non-datacenter).
-      # ─────────────────────────────────────────────────────────────
-
-      - name: Find residential proxy
-        id: find_proxy
-        run: |
-          # ── helper: returns 0 if proxy is residential, 1 otherwise ──
-          check_proxy_residential() {
-            local proxy="$1"
-            echo "    Testing: $proxy"
-            local result
-            result=$(curl -s --proxy "$proxy" \
-              "http://ip-api.com/json?fields=status,hosting,org" \
-              --max-time 10 2>/dev/null || echo "")
-            if [ -z "$result" ]; then
-              echo "      → Dead (no response)"
-              return 1
-            fi
-            local status hosting org
-            status=$(echo "$result"  | jq -r '.status  // empty')
-            hosting=$(echo "$result" | jq -r '.hosting // "true"')
-            org=$(echo "$result"     | jq -r '.org     // empty')
-            if [ "$status" != "success" ]; then
-              echo "      → Unreachable (ip-api status=$status)"
-              return 1
-            fi
-            if [ "$hosting" = "true" ]; then
-              echo "      → Datacenter/hosting ($org) — skip"
-              return 1
-            fi
-            echo "      → Residential ✓  ($org)"
-            return 0
-          }
-          # ─────────────────────────────────────────────────────────
-
-          FOUND_PROXY=""
-          MAX_CYCLES=10
-          cycle=0
-
-          while [ $cycle -lt $MAX_CYCLES ]; do
-            cycle=$((cycle + 1))
-            echo ">>> Proxy fetch cycle $cycle/$MAX_CYCLES"
-
-            PROXY_JSON=$(curl -s "https://deltacookie.vercel.app/api/in/proxy" --max-time 15 || echo "")
-            PROXIES=$(echo "$PROXY_JSON" | jq -r '.proxies[]?' 2>/dev/null || echo "")
-
-            if [ -z "$PROXIES" ]; then
-              echo "  Failed to fetch proxy list — retrying in 3 s..."
-              sleep 3
-              continue
-            fi
-
-            COUNT=$(echo "$PROXIES" | wc -l)
-            echo "  Fetched $COUNT proxies — checking each for residential..."
-
-            while IFS= read -r p; do
-              [ -z "$p" ] && continue
-              if check_proxy_residential "$p"; then
-                FOUND_PROXY="$p"
-                break 2
-              fi
-            done <<< "$PROXIES"
-
-            echo "  No residential proxy found in this batch — fetching a fresh list..."
-            sleep 2
-          done
-
-          if [ -z "$FOUND_PROXY" ]; then
-            echo "ERROR: Could not find a residential proxy after $MAX_CYCLES cycles"
-            exit 1
-          fi
-
-          echo "Selected residential proxy: $FOUND_PROXY"
-          echo "proxy=$FOUND_PROXY" >> $GITHUB_OUTPUT
 
       # ─────────────────────────────────────────────────────────────
       #  MAIN: deltastudy.fun
@@ -166,13 +88,11 @@ jobs:
         run: |
           TARGET_URL="${{ steps.cfg.outputs.target_url }}"
           SITEKEY="${{ steps.cfg.outputs.sitekey }}"
-          PROXY="${{ steps.find_proxy.outputs.proxy }}"
 
           PAYLOAD=$(jq -n \
-            --arg domain  "$TARGET_URL" \
+            --arg domain "$TARGET_URL" \
             --arg siteKey "$SITEKEY" \
-            --arg proxy   "$PROXY" \
-            '{url: $domain, sitekey: $siteKey, proxy: $proxy}')
+            '{url: $domain, sitekey: $siteKey, proxy: "http://stuuehkj-rotate:m0yp0at8c4d6@p.webshare.io:80"}')
           echo "Payload: $PAYLOAD"
 
           RESPONSE=""
@@ -299,106 +219,7 @@ jobs:
 
       # ─────────────────────────────────────────────────────────────
       #  BUDDY: deltaverse.site  (always runs, never blocks main)
-      #
-      #  Reuses the proxy found above if it is still alive.
-      #  If dead (or missing), runs the same residential-proxy
-      #  search loop (up to 10 cycles) before submitting.
       # ─────────────────────────────────────────────────────────────
-
-      - name: "[Buddy] Check / refresh proxy for deltaverse"
-        id: dv_proxy_check
-        if: always()
-        run: |
-          EXISTING_PROXY="${{ steps.find_proxy.outputs.proxy }}"
-
-          # ── quick liveness ping (no residential re-check needed) ──
-          proxy_is_alive() {
-            local proxy="$1"
-            local result
-            result=$(curl -s --proxy "$proxy" \
-              "http://ip-api.com/json?fields=status" \
-              --max-time 10 2>/dev/null || echo "")
-            echo "$result" | jq -e '.status == "success"' > /dev/null 2>&1
-          }
-
-          # ── full residential check (same as main step) ──────────
-          check_proxy_residential() {
-            local proxy="$1"
-            echo "    Testing: $proxy"
-            local result
-            result=$(curl -s --proxy "$proxy" \
-              "http://ip-api.com/json?fields=status,hosting,org" \
-              --max-time 10 2>/dev/null || echo "")
-            if [ -z "$result" ]; then
-              echo "      → Dead (no response)"
-              return 1
-            fi
-            local status hosting org
-            status=$(echo "$result"  | jq -r '.status  // empty')
-            hosting=$(echo "$result" | jq -r '.hosting // "true"')
-            org=$(echo "$result"     | jq -r '.org     // empty')
-            if [ "$status" != "success" ]; then
-              echo "      → Unreachable (ip-api status=$status)"
-              return 1
-            fi
-            if [ "$hosting" = "true" ]; then
-              echo "      → Datacenter/hosting ($org) — skip"
-              return 1
-            fi
-            echo "      → Residential ✓  ($org)"
-            return 0
-          }
-          # ─────────────────────────────────────────────────────────
-
-          # Try the existing proxy first
-          if [ -n "$EXISTING_PROXY" ] && proxy_is_alive "$EXISTING_PROXY"; then
-            echo "[buddy] Existing proxy still alive — reusing: $EXISTING_PROXY"
-            echo "dv_proxy=$EXISTING_PROXY" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "[buddy] Existing proxy is dead or unavailable — searching for a new residential proxy..."
-
-          FOUND_PROXY=""
-          MAX_CYCLES=10
-          cycle=0
-
-          while [ $cycle -lt $MAX_CYCLES ]; do
-            cycle=$((cycle + 1))
-            echo ">>> [buddy] Proxy fetch cycle $cycle/$MAX_CYCLES"
-
-            PROXY_JSON=$(curl -s "https://deltacookie.vercel.app/api/in/proxy" --max-time 15 || echo "")
-            PROXIES=$(echo "$PROXY_JSON" | jq -r '.proxies[]?' 2>/dev/null || echo "")
-
-            if [ -z "$PROXIES" ]; then
-              echo "  Failed to fetch proxy list — retrying in 3 s..."
-              sleep 3
-              continue
-            fi
-
-            COUNT=$(echo "$PROXIES" | wc -l)
-            echo "  Fetched $COUNT proxies — checking each for residential..."
-
-            while IFS= read -r p; do
-              [ -z "$p" ] && continue
-              if check_proxy_residential "$p"; then
-                FOUND_PROXY="$p"
-                break 2
-              fi
-            done <<< "$PROXIES"
-
-            echo "  No residential proxy found in this batch — fetching a fresh list..."
-            sleep 2
-          done
-
-          if [ -z "$FOUND_PROXY" ]; then
-            echo "[buddy] Could not find a residential proxy after $MAX_CYCLES cycles — deltaverse will be skipped"
-            echo "dv_proxy=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "[buddy] Selected residential proxy for deltaverse: $FOUND_PROXY"
-          echo "dv_proxy=$FOUND_PROXY" >> $GITHUB_OUTPUT
 
       - name: "[Buddy] Submit Turnstile for deltaverse.site"
         id: dv_submit
@@ -406,19 +227,11 @@ jobs:
         run: |
           DV_URL="https://pw.deltaverse.site/"
           DV_SITEKEY="0x4AAAAAAENNbymrakr0v3o7"
-          DV_PROXY="${{ steps.dv_proxy_check.outputs.dv_proxy }}"
-
-          if [ -z "$DV_PROXY" ]; then
-            echo "[buddy] No proxy available — skipping deltaverse Turnstile solve"
-            echo "dv_token=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
 
           PAYLOAD=$(jq -n \
-            --arg domain  "$DV_URL" \
+            --arg domain "$DV_URL" \
             --arg siteKey "$DV_SITEKEY" \
-            --arg proxy   "$DV_PROXY" \
-            '{url: $domain, sitekey: $siteKey, proxy: $proxy}')
+            '{url: $domain, sitekey: $siteKey, proxy: "http://stuuehkj-rotate:m0yp0at8c4d6@p.webshare.io:80"}')
           echo "Payload: $PAYLOAD"
 
           DV_TOKEN=""
